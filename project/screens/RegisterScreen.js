@@ -10,7 +10,7 @@ export default function RegisterScreen({ navigation }) {
 
   const handleRegister = async () => {
     try {
-      const res = await fetch("http://10.106.42.42:3000/api/register", {
+      const res = await fetch("http://192.168.10.4:3000/api/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ full_name: fullName, email, password, role }),

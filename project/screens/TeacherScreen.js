@@ -16,6 +16,8 @@ import {
   ScrollView,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { useNavigation } from "@react-navigation/native";
+import { Entypo } from "@expo/vector-icons";
 import DateTimePicker from "@react-native-community/datetimepicker";
 
 const BASE_URL = "http://192.168.10.4:3000"; // Android emulator: http://10.0.2.2:3000
@@ -23,6 +25,21 @@ const BASE_URL = "http://192.168.10.4:3000"; // Android emulator: http://10.0.2.
 export default function TeacherScreen() {
   const [token, setToken] = useState("");
   const [user, setUser] = useState(null);
+
+  const navigation = useNavigation();
+  const logout = async () => {
+    try {
+      await AsyncStorage.multiRemove(["token", "user"]);
+    } catch {}
+    setToken("");
+    setUser(null);
+    setExams([]);
+    setVisibleCreate(false);
+    setVisibleEdit(false);
+    setVisibleGrades(false);
+    setVisibleQEditor(false);
+    navigation.replace?.("Login") || navigation.navigate("Login");
+  };
 
   const [loading, setLoading] = useState(false);
   const [exams, setExams] = useState([]);
@@ -52,7 +69,7 @@ export default function TeacherScreen() {
   const [currentExam, setCurrentExam] = useState(null);
   const [grades, setGrades] = useState([]);
 
-  // ====== Question Editor ======
+  // ====== Question Editor (view/edit existing) ======
   const [visibleQEditor, setVisibleQEditor] = useState(false);
   const [qExam, setQExam] = useState(null);
   const [qLoading, setQLoading] = useState(false);
@@ -362,7 +379,7 @@ export default function TeacherScreen() {
     ]);
   }
 
-  // ====== GRADES ======  👇👇👇  (BỊ THIẾU – ĐÃ THÊM LẠI)
+  // ====== GRADES (đã sửa: đọc data.rows) ======
   async function openGrades(exam) {
     if (!token) return Alert.alert("Chưa đăng nhập", "Vui lòng đăng nhập lại.");
     setCurrentExam(exam);
@@ -375,18 +392,17 @@ export default function TeacherScreen() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        if (res.status === 401) Alert.alert("Phiên đăng nhập hết hạn", "Vui lòng đăng nhập lại.");
-        else Alert.alert("Lỗi", data?.error || `HTTP ${res.status}`);
+        Alert.alert("Lỗi", data?.error || `HTTP ${res.status}`);
         return;
       }
-      setGrades(Array.isArray(data) ? data : []);
+      // backend trả { total_rows, rows }
+      setGrades(Array.isArray(data?.rows) ? data.rows : []);
     } catch (e) {
       Alert.alert("Lỗi mạng", e?.message || String(e));
     } finally {
       setGradesLoading(false);
     }
   }
-  // ====== /GRADES ======
 
   // ====== QUESTION EDITOR (existing exam) ======
   async function openQuestionEditor(exam) {
@@ -456,7 +472,7 @@ export default function TeacherScreen() {
         const q = qForms[i];
         const oq = qOriginal[i];
 
-        // 1) cập nhật nội dung câu hỏi nếu đổi
+        // 1) update question text if changed
         const newQText = String(q.content ?? "").trim();
         const oldQText = String(oq.content ?? "").trim();
         if (newQText !== oldQText) {
@@ -469,7 +485,7 @@ export default function TeacherScreen() {
           if (!rq.ok) throw new Error(rj?.error || `Update question ${i + 1} failed`);
         }
 
-        // 2) cập nhật từng đáp án nếu đổi text/tick
+        // 2) update each changed choice
         for (let k = 0; k < q.choices.length; k++) {
           const c = q.choices[k];
           const oc = oq.choices[k];
@@ -542,7 +558,12 @@ export default function TeacherScreen() {
 
   return (
     <View style={styles.container}>
-      <Text style={styles.header}>👨‍🏫 Teacher Screen</Text>
+      <View style={styles.topBar}>
+        <Text style={styles.header}>👨‍🏫 Teacher Screen</Text>
+        <TouchableOpacity onPress={logout} style={styles.iconBtn} accessibilityLabel="Đăng xuất">
+          <Entypo name="log-out" size={24} color="black" />
+        </TouchableOpacity>
+      </View>
       <Text style={styles.info}>
         Xin chào, {user?.full_name || user?.email} <Text style={styles.roleTag}>(teacher)</Text>
       </Text>
@@ -777,12 +798,17 @@ export default function TeacherScreen() {
           ) : (
             <FlatList
               data={grades}
-              keyExtractor={(it, idx) => String(it.student_id || idx)}
+              keyExtractor={(it, idx) => String(it.submission_id || idx)}
               renderItem={({ item }) => (
                 <View style={styles.gradeItem}>
-                  <Text style={styles.gradeName}>{item.full_name || item.email || item.student_id}</Text>
+                  <Text style={styles.gradeName}>
+                    {item.full_name || item.email || item.student_id}
+                  </Text>
                   <Text style={styles.gradeScore}>
-                    {item.correct}/{item.total} • {item.score}%
+                    {item.correct}/{item.total} • {item.score_pct}% • {item.score10}/10
+                  </Text>
+                  <Text style={styles.small}>
+                    Nộp lúc: {new Date(item.submitted_at).toLocaleString()}
                   </Text>
                 </View>
               )}
@@ -803,6 +829,9 @@ const styles = StyleSheet.create({
   header: { fontSize: 24, fontWeight: "bold", marginBottom: 6, color: "#99C2FF" },
   info: { marginBottom: 10, color: "#4A90E2" },
   roleTag: { color: "#4A90E2", fontWeight: "700" },
+
+  topBar: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 8 },
+  iconBtn: { padding: 6, borderRadius: 8, backgroundColor: "transparent" },
 
   card: { padding: 12, backgroundColor: "#D0E7FF", borderRadius: 10, marginBottom: 10 },
   examTitle: { fontSize: 18, fontWeight: "700", marginBottom: 4 },

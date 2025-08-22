@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { supabase } from "../lib/supabase.js";
+import { db } from "../lib/supabase.js";
 import { requireAuth, requireTeacher } from "../middleware/requireAuth.js";
 
 const router = Router();
@@ -15,7 +15,7 @@ router.post("/:examId", requireAuth, requireTeacher, async (req, res) => {
     }
 
     // Kiểm tra quyền sở hữu đề
-    const { data: exam, error: e1 } = await supabase
+    const { data: exam, error: e1 } = await db
       .from("exams")
       .select("id, teacher_id, max_questions")
       .eq("id", examId)
@@ -25,7 +25,7 @@ router.post("/:examId", requireAuth, requireTeacher, async (req, res) => {
       return res.status(403).json({ error: "Not your exam" });
 
     // (Có thể giới hạn số câu hỏi theo max_questions nếu muốn)
-    const { data: cntRows } = await supabase
+    const { data: cntRows } = await db
       .from("questions")
       .select("id", { count: "exact", head: true })
       .eq("exam_id", examId);
@@ -34,7 +34,7 @@ router.post("/:examId", requireAuth, requireTeacher, async (req, res) => {
       return res.status(400).json({ error: "Vượt quá số câu tối đa của đề" });
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from("questions")
       .insert([{ exam_id: examId, content: content.trim(), meta }])
       .select("id")
@@ -57,7 +57,7 @@ router.put("/:id", requireAuth, requireTeacher, async (req, res) => {
     if (!content?.trim()) return res.status(400).json({ error: "Thiếu content" });
 
     // Quyền sở hữu: join sang exams
-    const { data: q, error: e1 } = await supabase
+    const { data: q, error: e1 } = await db
       .from("questions")
       .select("id, exam_id, exams!inner(teacher_id)")
       .eq("id", id)
@@ -66,7 +66,7 @@ router.put("/:id", requireAuth, requireTeacher, async (req, res) => {
     if (q.exams.teacher_id !== req.user.id)
       return res.status(403).json({ error: "Not your exam" });
 
-    const { error: e2 } = await supabase
+    const { error: e2 } = await db
       .from("questions")
       .update({ content: content.trim() })
       .eq("id", id);
@@ -85,7 +85,7 @@ router.post("/:questionId/choices", requireAuth, requireTeacher, async (req, res
     const { choices = [] } = req.body || {};
 
     // Quyền sở hữu
-    const { data: q, error: e1 } = await supabase
+    const { data: q, error: e1 } = await db
       .from("questions")
       .select("id, exam_id, exams!inner(teacher_id)")
       .eq("id", questionId)
@@ -106,7 +106,7 @@ router.post("/:questionId/choices", requireAuth, requireTeacher, async (req, res
     }
 
     const payload = cleaned.map(c => ({ question_id: questionId, ...c }));
-    const { error: e2 } = await supabase.from("choices").insert(payload);
+    const { error: e2 } = await db.from("choices").insert(payload);
     if (e2) return res.status(400).json({ error: e2.message });
 
     res.json({ inserted: payload.length });
@@ -122,7 +122,7 @@ router.put("/:questionId/choices", requireAuth, requireTeacher, async (req, res)
     const { choices = [] } = req.body || {};
 
     // Quyền sở hữu
-    const { data: q, error: e1 } = await supabase
+    const { data: q, error: e1 } = await db
       .from("questions")
       .select("id, exam_id, exams!inner(teacher_id)")
       .eq("id", questionId)
@@ -143,11 +143,11 @@ router.put("/:questionId/choices", requireAuth, requireTeacher, async (req, res)
     }
 
     // Xoá cũ → chèn mới
-    const { error: dErr } = await supabase.from("choices").delete().eq("question_id", questionId);
+    const { error: dErr } = await db.from("choices").delete().eq("question_id", questionId);
     if (dErr) return res.status(400).json({ error: dErr.message });
 
     const payload = cleaned.map(c => ({ question_id: questionId, ...c }));
-    const { error: iErr } = await supabase.from("choices").insert(payload);
+    const { error: iErr } = await db.from("choices").insert(payload);
     if (iErr) return res.status(400).json({ error: iErr.message });
 
     res.json({ replaced: payload.length });

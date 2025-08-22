@@ -1,26 +1,26 @@
 import { Router } from "express";
-import { supabase } from "../lib/supabase.js";
+import { db } from "../lib/supabase.js";
 import { requireAuth, requireTeacher } from "../middleware/requireAuth.js";
 
 const router = Router();
 
 // kiểm tra quyền sở hữu choice theo teacher
 async function ensureOwnsChoice(choiceId, teacherId) {
-  const { data: choice, error: cErr } = await supabase
+  const { data: choice, error: cErr } = await db
     .from("choices")
     .select("id, question_id")
     .eq("id", choiceId)
     .single();
   if (cErr || !choice) return { error: "Choice not found" };
 
-  const { data: q, error: qErr } = await supabase
+  const { data: q, error: qErr } = await db
     .from("questions")
     .select("id, exam_id")
     .eq("id", choice.question_id)
     .single();
   if (qErr || !q) return { error: "Question not found" };
 
-  const { data: exam, error: eErr } = await supabase
+  const { data: exam, error: eErr } = await db
     .from("exams")
     .select("id, teacher_id")
     .eq("id", q.exam_id)
@@ -41,7 +41,7 @@ router.put("/:id", requireAuth, requireTeacher, async (req, res) => {
 
   // nếu set đúng, clear các đáp án khác
   if (is_correct === true) {
-    const { error: clrErr } = await supabase
+    const { error: clrErr } = await db
       .from("choices")
       .update({ is_correct: false })
       .eq("question_id", check.question.id);
@@ -54,7 +54,7 @@ router.put("/:id", requireAuth, requireTeacher, async (req, res) => {
 
   if (Object.keys(patch).length === 0) return res.json({ success: true });
 
-  const { error } = await supabase.from("choices").update(patch).eq("id", id);
+  const { error } = await db.from("choices").update(patch).eq("id", id);
   if (error) return res.status(400).json({ error: error.message });
 
   res.json({ success: true });

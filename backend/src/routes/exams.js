@@ -1,41 +1,9 @@
 // src/routes/exams.js
 import { Router } from "express";
-import { supabase } from "../lib/supabase.js";
+import { db } from "../lib/supabase.js";
 import { requireAuth, requireTeacher } from "../middleware/requireAuth.js";
 
 const router = Router();
-
-/* =========================
-   Helpers
-========================= */
-const nowISO = () => new Date().toISOString();
-
-/** Lấy exam theo code và còn trong thời gian làm bài */
-async function findExamByCode(code) {
-  const now = nowISO();
-  const { data, error } = await supabase
-    .from("exams")
-    .select("id, title, description, starts_at, ends_at, max_questions, key_code, teacher_id")
-    .eq("key_code", code)
-    .lte("starts_at", now) // starts_at <= now
-    .gte("ends_at", now)   // ends_at >= now
-    .limit(1)
-    .maybeSingle();
-
-  if (error) return { error };
-  if (!data) return { error: new Error("Mã không hợp lệ hoặc không trong thời gian làm bài") };
-  return { exam: data };
-}
-
-/** Lấy số câu hỏi của exam */
-async function countQuestions(examId) {
-  const { count, error } = await supabase
-    .from("questions")
-    .select("id", { count: "exact", head: true })
-    .eq("exam_id", examId);
-  if (error) return { error };
-  return { total: count || 0 };
-}
 
 /* =========================
    1) Teacher tạo đề
@@ -43,7 +11,6 @@ async function countQuestions(examId) {
 router.post("/", requireAuth, requireTeacher, async (req, res) => {
   try {
     const { title, description, starts_at, ends_at, max_questions = 60 } = req.body;
-
     if (!title || !starts_at || !ends_at) {
       return res.status(400).json({ error: "Thiếu title/starts_at/ends_at" });
     }
@@ -51,18 +18,16 @@ router.post("/", requireAuth, requireTeacher, async (req, res) => {
       return res.status(400).json({ error: "ends_at phải sau starts_at" });
     }
 
-    const { data, error } = await supabase
+    const { data, error } = await db
       .from("exams")
-      .insert([
-        {
-          teacher_id: req.user.id,
-          title: title.trim(),
-          description: description ?? null,
-          starts_at,
-          ends_at,
-          max_questions: Math.max(1, Math.min(60, Number(max_questions) || 60)),
-        },
-      ])
+      .insert([{
+        teacher_id: req.user.id,
+        title: String(title).trim(),
+        description: description ?? null,
+        starts_at,
+        ends_at,
+        max_questions: Math.max(1, Math.min(60, Number(max_questions) || 60)),
+      }])
       .select("id, key_code")
       .single();
 
@@ -77,133 +42,116 @@ router.post("/", requireAuth, requireTeacher, async (req, res) => {
    2) Teacher xem list đề của mình
 ========================= */
 router.get("/mine", requireAuth, requireTeacher, async (req, res) => {
-  try {
-    const { data, error } = await supabase
-      .from("exams")
-      .select("id, title, description, key_code, starts_at, ends_at, max_questions, created_at")
-      .eq("teacher_id", req.user.id)
-      .order("created_at", { ascending: false });
-
-    if (error) return res.status(400).json({ error: error.message });
-    return res.json(data || []);
-  } catch (e) {
-    return res.status(500).json({ error: String(e.message || e) });
-  }
+  const { data, error } = await db
+    .from("exams")
+    .select("id, title, key_code, starts_at, ends_at, max_questions, created_at")
+    .eq("teacher_id", req.user.id)
+    .order("created_at", { ascending: false });
+  if (error) return res.status(400).json({ error: error.message });
+  res.json(data || []);
 });
 
 /* =========================
    3) Student nhập mã 6 số -> trả về thông tin đề (còn thời gian)
 ========================= */
 router.get("/join/:code", async (req, res) => {
-  try {
-    const code = String(req.params.code || "").trim();
-    if (!/^\d{6}$/.test(code)) {
-      return res.status(400).json({ error: "Mã phải là 6 chữ số" });
-    }
+  const code = String(req.params.code || "").trim();
 
-    const { exam, error } = await findExamByCode(code);
-    if (error) return res.status(404).json({ error: error.message });
-
-    // trả về thông tin cơ bản của đề
-    return res.json({
-      id: exam.id,
-      title: exam.title,
-      description: exam.description,
-      starts_at: exam.starts_at,
-      ends_at: exam.ends_at,
-      max_questions: exam.max_questions,
-      key_code: exam.key_code,
-    });
-  } catch (e) {
-    return res.status(500).json({ error: String(e.message || e) });
+  if (!/^\d{6}$/.test(code)) {
+    return res.status(400).json({ error: "Mã phải gồm 6 chữ số" });
   }
+
+  const { data: rows, error } = await db
+    .from("exams")
+    .select("id, title, description, starts_at, ends_at, max_questions, key_code")
+    .eq("key_code", code);
+
+  if (error) return res.status(400).json({ error: error.message });
+  if (!rows?.length) return res.status(404).json({ error: "Mã không hợp lệ" });
+
+  const exam = rows[0];
+
+  // kiểm tra thời gian ở Node
+  const now = new Date();
+  if (exam.starts_at && new Date(exam.starts_at) > now) {
+    return res.status(403).json({ error: "Chưa đến giờ làm bài" });
+  }
+  if (exam.ends_at && new Date(exam.ends_at) < now) {
+    return res.status(403).json({ error: "Đã hết thời gian làm bài" });
+  }
+
+  return res.json(exam);
 });
+
 
 /* =========================
    4) Lấy câu hỏi + đáp án cho học sinh làm bài
-      - Kiểm tra còn trong thời gian
-      - Random câu & đáp án
-      - ẨN is_correct để HS không nhìn thấy đáp án đúng
 ========================= */
 router.get("/:examId/questions", async (req, res) => {
   try {
-    const examId = req.params.examId;
+    const examId = String(req.params.examId ?? "").trim();
+    if (!examId) return res.status(400).json({ error: "Bad examId" });
 
-    // Kiểm tra thời gian đề thi
-    const { data: exam, error: eErr } = await supabase
+    // check đề tồn tại
+    const { data: ex, error: e0 } = await db
       .from("exams")
-      .select("id, starts_at, ends_at, max_questions")
+      .select("id")
       .eq("id", examId)
-      .single();
-    if (eErr) return res.status(400).json({ error: eErr.message });
+      .maybeSingle();
+    if (e0) return res.status(400).json({ error: e0.message });
+    if (!ex) return res.status(404).json({ error: "Exam not found" });
 
-    const now = new Date();
-    if (!(now >= new Date(exam.starts_at) && now <= new Date(exam.ends_at))) {
-      return res.status(403).json({ error: "Không nằm trong thời gian làm bài" });
-    }
-
-    // Lấy các câu hỏi của đề
-    const { data: questions, error: qErr } = await supabase
+    const { data, error } = await db
       .from("questions")
-      .select("id, content, meta")
-      .eq("exam_id", examId);
-    if (qErr) return res.status(400).json({ error: qErr.message });
+      .select("id, content, meta, choices:choices(id, content, is_correct)")
+      .eq("exam_id", examId)
+      .order("id", { ascending: true })
+      .order("id", { foreignTable: "choices", ascending: true });
 
-    // (tuỳ chọn) shuffle danh sách câu và cắt theo max_questions
-    let qList = [...(questions || [])];
-    qList.sort(() => Math.random() - 0.5);
-    const limit = Math.max(1, Math.min(exam.max_questions || 60, qList.length));
-    qList = qList.slice(0, limit);
+    if (error) return res.status(400).json({ error: error.message });
 
-    // Với từng câu, lấy đáp án và random trật tự — KHÔNG trả is_correct
-    const withChoices = [];
-    for (const q of qList) {
-      const { data: choices, error: cErr } = await supabase
-        .from("choices")
-        .select("id, content") // 👈 Ẩn is_correct ở API cho học sinh
-        .eq("question_id", q.id);
+    const out = (data || []).map((q) => ({
+      id: q.id,
+      content: String(q.content ?? ""),
+      meta: q.meta ?? null,
+      choices: (q.choices || []).map((c) => ({
+        id: c.id,
+        content: String(c.content ?? ""),
+        is_correct: !!c.is_correct, // client không dùng field này, nhưng tuỳ bạn muốn có/ẩn
+      })),
+    }));
 
-      if (cErr) return res.status(400).json({ error: cErr.message });
-
-      const shuffled = [...(choices || [])].sort(() => Math.random() - 0.5);
-      withChoices.push({ id: q.id, content: q.content, choices: shuffled });
+    if (out.length === 0) {
+      return res.status(404).json({ error: "Exam has no questions yet" });
     }
 
-    return res.json(withChoices);
-  } catch (e) {
-    return res.status(500).json({ error: String(e.message || e) });
+    return res.json(out);
+  } catch (err) {
+    return res.status(500).json({ error: err?.message || String(err) });
   }
 });
 
+
 /* =========================
-   5) Teacher xem điểm
-   - Kiểm tra quyền (teacher sở hữu đề)
-   - Tính correct/total theo số câu của đề
-   - Trả cả % (0..100) và thang 10 (0..10)
-   - Tuỳ chọn: phân trang, lọc (q=?), sắp xếp mới nhất
-   Query params:
-     page (>=1), page_size (1..200), q (lọc theo tên/email)
+   5) Teacher xem điểm (bản đơn giản – CHỈ 1 ROUTE)
 ========================= */
 router.get("/:examId/grades", requireAuth, requireTeacher, async (req, res) => {
   try {
-    const examId = req.params.examId;
-    const page = Math.max(1, parseInt(req.query.page || "1", 10));
-    const pageSize = Math.max(1, Math.min(200, parseInt(req.query.page_size || "100", 10)));
-    const qFilter = (req.query.q || "").toString().toLowerCase();
+    const examId = String(req.params.examId || "").trim();
+    if (!examId) return res.status(400).json({ error: "Bad examId" });
 
-    // Xác thực quyền sở hữu đề
-    const { data: exam, error: eErr } = await supabase
+    // 1) Xác thực: đề thuộc giáo viên này
+    const { data: exam, error: eExam } = await db
       .from("exams")
       .select("id, teacher_id")
       .eq("id", examId)
-      .single();
-    if (eErr) return res.status(400).json({ error: eErr.message });
-    if (!exam || exam.teacher_id !== req.user.id) {
+      .maybeSingle();
+    if (eExam) return res.status(400).json({ error: eExam.message });
+    if (!exam || exam.teacher_id !== req.user.id)
       return res.status(403).json({ error: "Không có quyền xem đề này" });
-    }
 
-    // Lấy mọi submissions của exam
-    const { data: subs, error: sErr } = await supabase
+    // 2) Lấy submissions của đề
+    const { data: subs, error: sErr } = await db
       .from("submissions")
       .select("id, student_id, submitted_at")
       .eq("exam_id", examId)
@@ -211,57 +159,56 @@ router.get("/:examId/grades", requireAuth, requireTeacher, async (req, res) => {
     if (sErr) return res.status(400).json({ error: sErr.message });
     if (!subs?.length) return res.json({ total_rows: 0, rows: [] });
 
-    // Tổng số câu của đề
-    const { total: totalQuestions, error: cqErr } = await countQuestions(examId);
-    if (cqErr) return res.status(400).json({ error: cqErr.message });
+    // 3) ID câu hỏi của đề
+    const { data: qRows, error: qErr } = await db
+      .from("questions")
+      .select("id")
+      .eq("exam_id", examId);
+    if (qErr) return res.status(400).json({ error: qErr.message });
+    const qIds = (qRows || []).map((q) => q.id);
+    const totalQuestions = qIds.length;
 
-    // Lấy toàn bộ answers của các submissions
+    // 4) Tất cả answers của các submissions
     const subIds = subs.map((s) => s.id);
-    const { data: answers, error: aErr } = await supabase
+    const { data: aRows, error: aErr } = await db
       .from("answers")
       .select("submission_id, question_id, choice_id")
       .in("submission_id", subIds);
     if (aErr) return res.status(400).json({ error: aErr.message });
 
-    // Lấy đáp án đúng cho các câu thuộc đề
-    const { data: correctChoices, error: cErr } = await supabase
+    // 5) Đáp án đúng
+    const { data: cRows, error: cErr } = await db
       .from("choices")
       .select("question_id, id")
       .eq("is_correct", true)
-      .in(
-        "question_id",
-        (
-          await supabase.from("questions").select("id").eq("exam_id", examId)
-        ).data?.map((q) => q.id) || []
-      );
+      .in("question_id", qIds);
     if (cErr) return res.status(400).json({ error: cErr.message });
-    const correctMap = new Map(correctChoices.map((c) => [c.question_id, c.id]));
+    const correctMap = new Map((cRows || []).map((c) => [c.question_id, c.id]));
 
-    // Gom answers theo submission
-    const bySub = new Map();
-    for (const a of answers || []) {
-      if (!bySub.has(a.submission_id)) bySub.set(a.submission_id, []);
-      bySub.get(a.submission_id).push(a);
-    }
-
-    // Lấy info học sinh
-    const studentIds = [...new Set(subs.map((s) => s.student_id))];
-    const { data: users, error: uErr } = await supabase
+    // 6) Thông tin học sinh
+    const studentIds = [...new Set(subs.map((s) => s.student_id).filter(Boolean))];
+    const { data: users, error: uErr } = await db
       .from("users")
       .select("id, full_name, email")
       .in("id", studentIds);
     if (uErr) return res.status(400).json({ error: uErr.message });
     const userMap = new Map((users || []).map((u) => [u.id, u]));
 
-    // Tính điểm + build rows
-    let rows = subs.map((s) => {
+    // Gom answers theo submission
+    const bySub = new Map();
+    for (const a of aRows || []) {
+      if (!bySub.has(a.submission_id)) bySub.set(a.submission_id, []);
+      bySub.get(a.submission_id).push(a);
+    }
+
+    // 7) Tính điểm
+    const rows = subs.map((s) => {
       const list = bySub.get(s.id) || [];
       let correct = 0;
       for (const a of list) if (correctMap.get(a.question_id) === a.choice_id) correct++;
-      const total = totalQuestions || 0;
 
-      const pct = total ? Math.round((correct / total) * 100) : 0;
-      // thang 10 làm tròn 1 chữ số thập phân
+      const total = totalQuestions;
+      const score_pct = total ? Math.round((correct / total) * 100) : 0;
       const score10 = total ? Math.round(((correct / total) * 10) * 10) / 10 : 0;
 
       const u = userMap.get(s.student_id) || {};
@@ -272,41 +219,25 @@ router.get("/:examId/grades", requireAuth, requireTeacher, async (req, res) => {
         email: u.email || null,
         correct,
         total,
-        score_pct: pct,   // 0..100
-        score10,          // 0..10 (1 chữ số thập phân)
+        score_pct,
+        score10,
         submitted_at: s.submitted_at,
       };
     });
 
-    // (tuỳ chọn) lọc theo q (tên/email)
-    if (qFilter) {
-      rows = rows.filter((r) => {
-        const name = (r.full_name || "").toLowerCase();
-        const mail = (r.email || "").toLowerCase();
-        const sid = String(r.student_id || "");
-        return name.includes(qFilter) || mail.includes(qFilter) || sid.includes(qFilter);
-      });
-    }
-
-    // Phân trang (sau khi lọc)
-    const total_rows = rows.length;
-    const start = (page - 1) * pageSize;
-    const end = start + pageSize;
-    const pageRows = rows.slice(start, end);
-
-    return res.json({ total_rows, page, page_size: pageSize, rows: pageRows });
+    return res.json({ total_rows: rows.length, rows });
   } catch (e) {
-    return res.status(500).json({ error: String(e.message || e) });
+    return res.status(500).json({ error: e?.message || String(e) });
   }
 });
 
+
 /* =========================
-   6) Sửa thời gian / thông tin đề (teacher)
+   6) Sửa thời gian / thông tin đề
 ========================= */
 router.put("/:id", requireAuth, requireTeacher, async (req, res) => {
   try {
-    const me = req.user;
-    const examId = req.params.id;
+    const examId = String(req.params.id);
     const { starts_at, ends_at, title, description, max_questions } = req.body;
 
     if (!starts_at || !ends_at)
@@ -314,25 +245,23 @@ router.put("/:id", requireAuth, requireTeacher, async (req, res) => {
     if (new Date(ends_at) <= new Date(starts_at))
       return res.status(400).json({ error: "ends_at phải sau starts_at" });
 
-    const { data: exam, error: e1 } = await supabase
+    const { data: exam, error: e1 } = await db
       .from("exams")
       .select("id, teacher_id")
       .eq("id", examId)
-      .single();
-    if (e1) return res.status(404).json({ error: "Exam not found" });
-    if (exam.teacher_id !== me.id)
+      .maybeSingle();
+    if (e1) return res.status(400).json({ error: e1.message });
+    if (!exam) return res.status(404).json({ error: "Exam not found" });
+    if (exam.teacher_id !== req.user.id)
       return res.status(403).json({ error: "Not your exam" });
 
-    const patch = {
-      starts_at,
-      ends_at,
-    };
+    const patch = { starts_at, ends_at };
     if (title !== undefined) patch.title = String(title || "").trim();
     if (description !== undefined) patch.description = description ?? null;
     if (max_questions !== undefined)
       patch.max_questions = Math.max(1, Math.min(60, Number(max_questions) || 60));
 
-    const { error: e2 } = await supabase.from("exams").update(patch).eq("id", examId);
+    const { error: e2 } = await db.from("exams").update(patch).eq("id", examId);
     if (e2) return res.status(400).json({ error: e2.message });
 
     return res.json({ success: true });
@@ -342,26 +271,25 @@ router.put("/:id", requireAuth, requireTeacher, async (req, res) => {
 });
 
 /* =========================
-   7) Xoá đề (teacher) — rely ON DELETE CASCADE
+   7) Xoá đề (ON DELETE CASCADE)
 ========================= */
 router.delete("/:id", requireAuth, requireTeacher, async (req, res) => {
   try {
-    const me = req.user;
-    const examId = req.params.id;
+    const { id } = req.params;
 
-    const { data: exam, error: e1 } = await supabase
+    const { data: exam, error: e1 } = await db
       .from("exams")
-      .select("id, teacher_id")
-      .eq("id", examId)
-      .single();
-    if (e1) return res.status(404).json({ error: "Exam not found" });
-    if (exam.teacher_id !== me.id)
-      return res.status(403).json({ error: "Not your exam" });
+      .select("id")
+      .eq("id", id)
+      .eq("teacher_id", req.user.id)
+      .maybeSingle();
 
-    const { error: e2 } = await supabase.from("exams").delete().eq("id", examId);
+    if (e1) return res.status(400).json({ error: e1.message });
+    if (!exam) return res.status(404).json({ error: "Exam not found or not yours" });
+
+    const { error: e2 } = await db.from("exams").delete().eq("id", id);
     if (e2) return res.status(400).json({ error: e2.message });
 
-    // Nhờ ON DELETE CASCADE mà questions/choices/answers/submissions đi theo
     return res.json({ success: true });
   } catch (e) {
     return res.status(500).json({ error: String(e.message || e) });
@@ -369,23 +297,23 @@ router.delete("/:id", requireAuth, requireTeacher, async (req, res) => {
 });
 
 /* =========================
-   8) Lấy câu hỏi (cho giáo viên sửa) – KHÔNG random, có is_correct
+   8) Lấy câu hỏi (cho giáo viên sửa) – có is_correct
 ========================= */
 router.get("/:id/questions/manage", requireAuth, requireTeacher, async (req, res) => {
   try {
-    const me = req.user;
-    const examId = req.params.id;
+    const examId = String(req.params.id);
 
-    const { data: exam, error: e1 } = await supabase
+    const { data: exam, error: e1 } = await db
       .from("exams")
       .select("teacher_id")
       .eq("id", examId)
-      .single();
-    if (e1) return res.status(404).json({ error: "Exam not found" });
-    if (exam.teacher_id !== me.id)
+      .maybeSingle();
+    if (e1) return res.status(400).json({ error: e1.message });
+    if (!exam) return res.status(404).json({ error: "Exam not found" });
+    if (exam.teacher_id !== req.user.id)
       return res.status(403).json({ error: "Not your exam" });
 
-    const { data: questions, error: e2 } = await supabase
+    const { data: questions, error: e2 } = await db
       .from("questions")
       .select("id, content")
       .eq("exam_id", examId)
@@ -395,7 +323,7 @@ router.get("/:id/questions/manage", requireAuth, requireTeacher, async (req, res
     const qIds = (questions || []).map((q) => q.id);
     let choicesByQ = {};
     if (qIds.length) {
-      const { data: choices, error: e3 } = await supabase
+      const { data: choices, error: e3 } = await db
         .from("choices")
         .select("id, question_id, content, is_correct")
         .in("question_id", qIds)

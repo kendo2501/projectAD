@@ -77,7 +77,7 @@ export default function LoginScreen({ navigation }) {
 
   return (
     <View style={styles.container}>
-      <Text style={styles.title}>FLAG {"\n"} GAME</Text>
+      <Text style={styles.title}>QUIZ {"\n"} MOBILE</Text>
       <Text style={styles.subtitle}>Login</Text>
 
       <TextInput

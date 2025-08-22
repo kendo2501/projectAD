@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { supabase } from "../lib/supabase.js";
+import { db } from "../lib/supabase.js";
 
 const router = Router();
 
@@ -13,11 +13,11 @@ router.post("/register", async (req, res) => {
     return res.status(400).json({ success: false, error: "Role không hợp lệ" });
   }
 
-  const { data, error } = await supabase.auth.signUp({ email, password });
+  const { data, error } = await db.auth.signUp({ email, password });
   if (error) return res.status(400).json({ success: false, error: error.message });
 
   const user = data.user;
-  const { error: insertError } = await supabase
+  const { error: insertError } = await db
     .from("users")
     .insert([{ id: user.id, full_name, email, role }]);
 
@@ -29,10 +29,10 @@ router.post("/register", async (req, res) => {
 
 router.post("/login", async (req, res) => {
   const { email, password } = req.body;
-  const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+  const { data, error } = await db.auth.signInWithPassword({ email, password });
   if (error) return res.status(400).json({ success: false, error: error.message });
 
-  const { data: userInfo, error: userError } = await supabase
+  const { data: userInfo, error: userError } = await db
     .from("users")
     .select("full_name, role")
     .eq("id", data.user.id)
@@ -56,10 +56,10 @@ router.get("/profile", async (req, res) => {
   const token = req.headers.authorization?.split(" ")[1];
   if (!token) return res.status(401).json({ error: "No token" });
 
-  const { data, error } = await supabase.auth.getUser(token);
+  const { data, error } = await db.auth.getUser(token);
   if (error) return res.status(401).json({ error: error.message });
 
-  const { data: userInfo, error: userError } = await supabase
+  const { data: userInfo, error: userError } = await db
     .from("users")
     .select("full_name, role")
     .eq("id", data.user.id)

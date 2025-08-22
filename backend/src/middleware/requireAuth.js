@@ -1,48 +1,42 @@
-import { supabase } from "../lib/supabase.js";
+// src/middleware/requireAuth.js
+import { db } from "../lib/supabase.js";
 
 export async function requireAuth(req, res, next) {
   try {
-    const token = req.headers.authorization?.split(" ")[1];
-    if (!token) return res.status(401).json({ error: "Missing token" });
+    const auth = req.headers.authorization || "";
+    const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+    if (!token) return res.status(401).json({ error: "No token" });
 
-    // Lấy user từ access token
-    const { data: getUserData, error: getUserErr } = await supabase.auth.getUser(token);
-    if (getUserErr || !getUserData?.user) {
-      return res.status(401).json({ error: getUserErr?.message || "Invalid token" });
-    }
-    const authed = getUserData.user;
+    const { data, error } = await db.auth.getUser(token);
+    if (error || !data?.user) return res.status(401).json({ error: "Invalid token" });
 
-    // Lấy role/full_name từ bảng users
-    const { data: profile, error: profErr } = await supabase
+    const uid = data.user.id;
+
+    // Lấy profile/role từ bảng users (service-role bypass RLS)
+    const { data: urow, error: uerr } = await db
       .from("users")
-      .select("full_name, role")
-      .eq("id", authed.id)
-      .single();
-
-    if (profErr) return res.status(400).json({ error: profErr.message });
+      .select("id, email, full_name, role")
+      .eq("id", uid)
+      .maybeSingle();
+    if (uerr) return res.status(400).json({ error: uerr.message });
 
     req.user = {
-      id: authed.id,
-      email: authed.email,
-      full_name: profile.full_name,
-      role: profile.role, // 'teacher' | 'student'
+      id: uid,
+      email: urow?.email || data.user.email || null,
+      full_name: urow?.full_name || null,
+      role: (urow?.role || "").toString().trim().toLowerCase(),
     };
+
     next();
   } catch (e) {
-    next(e);
+    return res.status(500).json({ error: e?.message || "Auth failed" });
   }
 }
 
 export function requireTeacher(req, res, next) {
-  if (req.user?.role !== "teacher") {
+  const role = (req.user?.role || "").toLowerCase();
+  if (role === "student") {
     return res.status(403).json({ error: "Teacher only" });
-  }
-  next();
-}
-
-export function requireStudent(req, res, next) {
-  if (req.user?.role !== "student") {
-    return res.status(403).json({ error: "Student only" });
   }
   next();
 }

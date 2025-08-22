@@ -14,63 +14,38 @@ const router = Router();
  * Trả:  { submission_id, correct, total, score100, submitted_at }
  */
 router.post("/:examId/submit", requireAuth, async (req, res) => {
-  const studentId = req.user.id;
-  const examId = String(req.params.examId || "").trim();
-  const answers = Array.isArray(req.body.answers) ? req.body.answers : [];
-  if (!examId) return res.status(400).json({ error: "Bad examId" });
-  if (!answers.length) return res.status(400).json({ error: "No answers" });
+  try {
+    const examId = String(req.params.examId || "").trim();
+    const { answers } = req.body;
+    const studentId = req.user.id;
 
-  const { data: exam, error: eExam } = await db
-    .from("exams").select("id, starts_at, ends_at").eq("id", examId).maybeSingle();
-  if (eExam) return res.status(400).json({ error: eExam.message });
-  if (!exam) return res.status(404).json({ error: "Exam not found" });
+    // 1) tạo submission
+    const { data: sub, error: sErr } = await db
+      .from("submissions")
+      .insert({
+        exam_id: examId,
+        student_id: studentId,
+        submitted_at: new Date().toISOString(),
+      })
+      .select("id")
+      .single();
 
-  const now = new Date();
-  if (exam.starts_at && new Date(exam.starts_at) > now) {
-    return res.status(403).json({ error: "Chưa đến giờ làm bài" });
+    if (sErr) return res.status(400).json({ error: sErr.message });
+
+    // 2) insert answers
+    const rows = (answers || []).map((a) => ({
+      submission_id: sub.id,
+      question_id: a.question_id,
+      choice_id: a.choice_id,
+    }));
+
+    const { error: aErr } = await db.from("answers").insert(rows);
+    if (aErr) return res.status(400).json({ error: aErr.message });
+
+    return res.json({ submission_id: sub.id });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
-  if (exam.ends_at && new Date(exam.ends_at) < now) {
-    return res.status(403).json({ error: "Đã hết thời gian làm bài" });
-  }
-
-  const { data: existed, error: eExist } = await db
-    .from("submissions").select("id")
-    .eq("exam_id", examId).eq("student_id", studentId).maybeSingle();
-  if (eExist) return res.status(400).json({ error: eExist.message });
-  if (existed) return res.status(409).json({ error: "Bạn đã nộp bài này rồi" });
-
-  const { data: sub, error: eSub } = await db
-    .from("submissions").insert([{ exam_id: examId, student_id: studentId }])
-    .select("id, submitted_at").single();
-  if (eSub) return res.status(400).json({ error: eSub.message });
-
-  const submissionId = sub.id;
-
-  const { data: qRows, error: eQ } = await db
-    .from("questions").select("id").eq("exam_id", examId);
-  if (eQ) return res.status(400).json({ error: eQ.message });
-
-  const allowedQ = new Set((qRows || []).map((q) => q.id));
-  const cleaned = answers
-    .map(a => ({ submission_id: submissionId, question_id: Number(a.question_id), choice_id: Number(a.choice_id) }))
-    .filter(a => Number.isFinite(a.question_id) && Number.isFinite(a.choice_id) && allowedQ.has(a.question_id));
-  if (!cleaned.length) return res.status(400).json({ error: "No valid answers for this exam" });
-
-  const { error: eAns } = await db.from("answers").insert(cleaned);
-  if (eAns) return res.status(400).json({ error: eAns.message });
-
-  const { data: correctChoices, error: eC } = await db
-    .from("choices").select("question_id, id").eq("is_correct", true)
-    .in("question_id", [...allowedQ]);
-  if (eC) return res.status(400).json({ error: eC.message });
-
-  const cmap = new Map((correctChoices || []).map(c => [c.question_id, c.id]));
-  let correct = 0;
-  for (const a of cleaned) if (cmap.get(a.question_id) === a.choice_id) correct++;
-  const total = allowedQ.size;
-  const score100 = total ? Math.round((correct / total) * 100) : 0;
-
-  res.json({ submission_id: submissionId, correct, total, score100, submitted_at: sub.submitted_at });
 });
 /**
  * GET /api/submissions/mine/latest
